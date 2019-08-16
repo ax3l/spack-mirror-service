@@ -1,1 +1,2 @@
-openpmd-api
+openpmd-api +python +adios1
+adios2 +python ^py-numpy@1.16.4
