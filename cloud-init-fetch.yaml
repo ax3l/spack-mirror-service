@@ -1,0 +1,117 @@
+#cloud-config
+# vim: syntax=yaml
+
+# TODO edit the volume ID if needed
+mounts:
+  - [ /dev/disk/by-id/scsi-0HC_Volume_<1234567>,
+      /mirror,
+      "ext4",
+      "defaults,noexec", "0", "1" ]
+
+# logging
+output: { all: "| tee -a /var/log/cloud-init-output.log" }
+
+# update apt repos and update packages
+# TODO comment in again
+#package_update: true
+#package_upgrade: true
+
+packages:
+  - autoconf
+  - build-essential
+  - ca-certificates
+  - coreutils
+  - curl
+  - environment-modules
+  - g++
+  - gfortran
+  - git
+  - python
+  - tcl
+  - unzip
+
+# TODO set and potentially keep spack cache location?
+#      avoid download of already known files, otherwise forces re-download and validation
+# TODO potentially limit parallelism of spack builds
+write_files:
+  - content: |
+        # load spack environment on login
+        export SPACK_ROOT="/usr/local"
+        if [ -f "${SPACK_ROOT}/share/spack/setup-env.sh" ]; then
+            source ${SPACK_ROOT}/share/spack/setup-env.sh
+        else
+            echo "Spack setup-env.sh not found in \"${SPACK_ROOT}\""
+        fi
+    path: /etc/profile.d/spack.sh
+  - content: |
+        #!/bin/bash
+        #
+        # temporary dir for work
+        tmp_src="/tmp/source"
+
+        # copy current live image
+        lve_src="/mirror/live/source"
+        cp -ar ${lve_src} ${tmp_src}/ 2>/dev/null || echo "no old source found"
+
+        # refresh source mirror
+        #   TODO add re-tries: N sleep tries to deal with temporary network issues
+        #   TODO add handling: "wrong" specs and concretizer conflicts can error here
+        spack mirror create -D -d ${tmp_src} -f /var/local/spack-mirror.specs
+
+        # time in UTC
+        t=$(date -u +"%Y%m%d_%H%M%S")
+        new_src="/mirror/source_${t}"
+
+        # change owner to nginx:nginx on docker nginx/alpine
+        #   https://github.com/nginxinc/docker-nginx/blob/master/stable/alpine/Dockerfile
+        nginx_uid=101
+        nginx_gid=101
+        chown -R ${nginx_uid}:${nginx_gid} ${tmp_src}
+        if [ ! -d /mirror/live ]; then
+            mkdir -p /mirror/live
+            chown -R ${nginx_uid}:${nginx_gid} /mirror/live
+        fi
+
+        # move back
+        mv ${tmp_src} ${new_src}
+
+        # atomic swap of link
+        old_src=$(readlink -e ${lve_src} || echo "0")
+        ln -nsf ${new_src} ${lve_src}
+
+        # remove old
+        if [ "$old_src" != "0" ]; then
+            rm -rf ${old_src}
+        fi
+    path: /usr/bin/refresh-sources
+    permissions: '0555'
+
+# TODO decide how much of this is a good idea to be run as root
+#      note: /etc/profile.d/spack.sh is already executing code, maybe source manually
+runcmd:
+  # SSH
+  # - sed -i -e '/^PermitRootLogin/s/^.*$/PermitRootLogin no/' /etc/ssh/sshd_config
+  # - sed -i -e '$aAllowUsers nginx' /etc/ssh/sshd_config
+  # - service ssh restart
+
+  # Spack Setup
+  - 'curl -s -L "https://github.com/llnl/spack/archive/develop.tar.gz" | tar xzC /usr/local --strip 1'
+
+  # Get Specs
+  - 'curl -s -L "https://raw.githubusercontent.com/ax3l/spack-mirror-service/master/spack-mirror.specs" -o /var/local/spack-mirror.specs'
+
+  # Source Mirror
+  # TODO the output of this command is buffered quite long before it becomes visible in the logs
+  - 'DEBIAN_FRONTEND=noninteractive bash -l refresh-sources'
+
+  # TODO Binary Mirror
+  # - 'FORCE_UNSAFE_CONFIGURE=1 bash -l refresh-binaries'
+
+  - sync
+# TODO comment in again after testing
+#  - shutdown
+
+#power_state:
+#  mode: poweroff
+#  message: Finished refreshing mirror. Shutting down.
+#  timeout: 30
